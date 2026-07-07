@@ -6859,7 +6859,8 @@ function ChatPage(props: ChatPageProps) {
         const result = await window.electronAPI.chat.getVoiceTranscript(
           session.username,
           String(msg.localId),
-          msg.createTime
+          msg.createTime,
+          msg.serverIdRaw || msg.serverId
         )
         return { success: result.success }
       } catch {
@@ -10837,7 +10838,8 @@ function MessageBubble({
       const result = await window.electronAPI.chat.getVoiceTranscript(
           session.username,
           String(message.localId),
-          message.createTime
+          message.createTime,
+          message.serverIdRaw || message.serverId
       )
 
       if (result.success) {
