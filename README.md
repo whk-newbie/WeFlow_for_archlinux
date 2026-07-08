@@ -75,6 +75,15 @@ WeFlow 提供本地 HTTP API 服务，支持通过接口查询消息数据，可
 
 完整接口文档：[点击查看](docs/HTTP-API.md)
 
+## Linux 平台修正说明 (2026-07-08)
+
+本分支针对 Linux 平台（特别是 Flatpak 安装的微信和 AppImage 打包）做了以下修正：
+
+1. **Flatpak 微信支持**：原代码无法拉起通过 Flatpak 安装的微信（`com.tencent.WeChat`），已在启动列表中新增 `flatpak run com.tencent.WeChat` 及 Flatpak 沙箱内二进制路径
+2. **AppImage 环境 PATH 补全**：AppImage 内部 PATH 极简且不含 `/usr/bin`、`/var/lib/flatpak/exports/bin` 等系统路径，导致 `spawn` 找不到 `flatpak`、`pidof` 等命令
+3. **可执行权限修复**：`xkey_helper_linux` 和 `welive` 二进制文件原始权限为 644（无可执行位），导致 AppImage 打包后出现 EACCES 错误
+4. **AppImage FUSE 隔离修复**：AppImage 通过 FUSE 挂载，root 用户无法访问挂载点内文件。执行 `db_hook`（需 sudo）前会先将 `xkey_helper_linux` 复制到 `/tmp/`
+
 ## 面向开发者
 
 如果你想从源码构建或为项目贡献代码，请遵循以下步骤：
