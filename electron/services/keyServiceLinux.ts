@@ -57,9 +57,10 @@ export class KeyServiceLinux {
   ): Promise<DbKeyResult> {
     try {
       // 1. 构造一个包含常用系统命令路径的环境变量，防止打包后找不到命令
+      const SYSTEM_PATHS = '/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/var/lib/flatpak/exports/bin';
       const envWithPath = {
         ...process.env,
-        PATH: `${process.env.PATH || ''}:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin`
+        PATH: `${process.env.PATH || ''}:${SYSTEM_PATHS}`
       };
 
       onStatus?.('正在尝试结束当前微信进程...', 0)
@@ -92,8 +93,11 @@ export class KeyServiceLinux {
       delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE;
       delete cleanEnv.APPDIR;
       delete cleanEnv.APPIMAGE;
+      // 确保 spawn 能访问系统命令（AppImage 内部的 PATH 不含 flatpak 等）
+      cleanEnv.PATH = `${cleanEnv.PATH || ''}:${SYSTEM_PATHS}`;
 
-      const wechatBins = [
+      // [cmd, ...args] 格式，方便传参数给 flatpak 等启动方式
+      const wechatBins: Array<string | [string, ...string[]]> = [
         'wechat',
         'wechat-bin',
         'xwechat',
@@ -104,25 +108,30 @@ export class KeyServiceLinux {
         '/opt/apps/com.tencent.wechat/files/wechat',
         '/usr/bin/wechat-bin',
         '/usr/local/bin/wechat-bin',
-        'com.tencent.wechat'
+        'com.tencent.wechat',
+        'com.tencent.WeChat',
+        ['flatpak', 'run', 'com.tencent.WeChat'],
+        '/var/lib/flatpak/app/com.tencent.WeChat/current/active/files/bin/wechat',
       ]
 
-      for (const binName of wechatBins) {
+      for (const entry of wechatBins) {
+        const [cmd, ...args] = Array.isArray(entry) ? entry : [entry]
+        const label = Array.isArray(entry) ? entry.join(' ') : entry
         try {
-          const child = spawn(binName, [], {
+          const child = spawn(cmd, args, {
             detached: true,
             stdio: 'ignore',
             env: cleanEnv
           });
 
           child.on('error', (err) => {
-            console.log(`[Debug] 拉起 ${binName} 失败:`, err.message);
+            console.log(`[Debug] 拉起 ${label} 失败:`, err.message);
           });
 
           child.unref();
-          console.log(`[Debug] 尝试拉起 ${binName} 完毕`);
+          console.log(`[Debug] 尝试拉起 ${label} 完毕`);
         } catch (e: any) {
-          console.log(`[Debug] 尝试拉起 ${binName} 发生异常:`, e.message);
+          console.log(`[Debug] 尝试拉起 ${label} 发生异常:`, e.message);
         }
       }
 
@@ -199,6 +208,21 @@ export class KeyServiceLinux {
         return { success: false, error: err }
       }
 
+      // AppImage 通过 FUSE 挂载，root 无法访问挂载点内的文件。
+      // 需要先把 helper 复制到 /tmp，使 pkexec/sudo 可执行。
+      const os = require('os')
+      const tmpHelperDir = os.tmpdir()
+      const tmpHelperName = `xkey_helper_linux_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      const tmpHelperPath = require('path').join(tmpHelperDir, tmpHelperName)
+      try {
+        require('fs').copyFileSync(helperPath, tmpHelperPath)
+        require('fs').chmodSync(tmpHelperPath, 0o755)
+      } catch (copyErr: any) {
+        const err = `无法准备 helper 到临时目录: ${copyErr.message}`
+        onStatus?.(err, 2)
+        return { success: false, error: err }
+      }
+
       return await new Promise((resolve) => {
         const options = {
           name: 'WeFlow',
@@ -207,12 +231,15 @@ export class KeyServiceLinux {
           }
         }
         const timeoutSec = Math.ceil((timeoutMs + 15_000) / 1000)
-        const command = `timeout -k 5s ${timeoutSec}s "${helperPath}" db_hook ${pid} ${targetAddr} ${timeoutMs}`
+        // 使用 /tmp 下的副本，root 可访问；执行完后自动删除
+        const command = `timeout -k 5s ${timeoutSec}s "${tmpHelperPath}" db_hook ${pid} ${targetAddr} ${timeoutMs}; rm -f "${tmpHelperPath}"`
         let settled = false
         const finish = (result: DbKeyResult) => {
           if (settled) return
           settled = true
           clearTimeout(watchdog)
+          // 清理临时 helper 副本
+          execAsync(`rm -f "${tmpHelperPath}"`).catch(() => {})
           resolve(result)
         }
         const watchdog = setTimeout(() => {
