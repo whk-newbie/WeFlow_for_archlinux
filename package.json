@@ -79,8 +79,8 @@
     "appId": "com.WeFlow.app",
     "publish": {
       "provider": "github",
-      "owner": "hicccc77",
-      "repo": "WeFlow",
+      "owner": "whk-newbie",
+      "repo": "WeFlow_for_archlinux",
       "releaseType": "release"
     },
     "productName": "WeFlow",
