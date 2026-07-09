@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
+import { existsSync, readdirSync, statSync, readFileSync, symlinkSync, mkdirSync } from 'fs'
+import { homedir } from 'os'
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
@@ -286,6 +287,33 @@ export class KeyServiceLinux {
     }
   }
 
+  /**
+   * Flatpak 微信数据目录在 ~/.var/app/com.tencent.WeChat/.xwechat/ 下，
+   * 而 helper (xkey_helper_linux) 只扫描标准路径 ~/.xwechat/。
+   * 自动创建软链接，使 helper 能读取 Flatpak 数据。
+   */
+  private ensureFlatpakWeChatLinks(): void {
+    const home = homedir()
+    const flatpakBase = join(home, '.var', 'app', 'com.tencent.WeChat', '.xwechat')
+    if (!existsSync(flatpakBase)) return
+
+    const mappings: Array<[string, string]> = [
+      ['net/kvcomm', 'net/kvcomm'],
+      ['ilink/kvcomm', 'ilink/kvcomm'],
+    ]
+
+    for (const [srcRel, dstRel] of mappings) {
+      const src = join(flatpakBase, srcRel)
+      const dst = join(home, '.xwechat', dstRel)
+      if (existsSync(src) && !existsSync(dst)) {
+        try {
+          mkdirSync(join(dst, '..'), { recursive: true })
+          symlinkSync(src, dst)
+        } catch { /* 忽略权限/已存在等错误 */ }
+      }
+    }
+  }
+
   public async autoGetImageKey(
       accountPath?: string,
       onProgress?: (msg: string) => void,
@@ -293,6 +321,7 @@ export class KeyServiceLinux {
   ): Promise<ImageKeyResult> {
     try {
       onProgress?.('正在初始化缓存扫描...');
+      this.ensureFlatpakWeChatLinks()
       const helperPath = this.getHelperPath()
       const { stdout } = await execFileAsync(helperPath, ['image_local'])
       const res = JSON.parse(stdout.trim())
