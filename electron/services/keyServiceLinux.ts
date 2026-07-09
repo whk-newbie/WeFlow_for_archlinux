@@ -369,8 +369,13 @@ export class KeyServiceLinux {
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
-      // 2. 找微信 PID
-      const { stdout } = await execAsync('pidof wechat wechat-bin xwechat').catch(() => ({ stdout: '' }))
+      // 2. 找微信 PID（补全 PATH，因为 AppImage 环境可能找不到 pidof）
+      const SYSTEM_PATHS_IMAGE = '/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin'
+      const envWithPaths = {
+        ...process.env,
+        PATH: `${process.env.PATH || ''}:${SYSTEM_PATHS_IMAGE}`
+      }
+      const { stdout } = await execAsync('pidof wechat wechat-bin xwechat', { env: envWithPaths }).catch(() => ({ stdout: '' }))
       const pids = stdout.trim().split(/\s+/).filter(p => p)
       if (pids.length === 0) return { success: false, error: '微信未运行，无法扫描内存' }
       const pid = parseInt(pids[0], 10)
@@ -381,30 +386,67 @@ export class KeyServiceLinux {
       const ciphertextHex = ciphertext.toString('hex')
       const helperPath = this.getHelperPath()
 
+      // 复制 helper 到 /tmp：AppImage FUSE 挂载 root 无法访问
+      const os = require('os')
+      const tmpHelperDir = os.tmpdir()
+      const tmpHelperName = `xkey_helper_linux_img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+      const tmpImageHelperPath = require('path').join(tmpHelperDir, tmpHelperName)
       try {
-        console.log(`[Debug] 准备执行 Helper: ${helperPath} image_mem ${pid} ${ciphertextHex}`);
+        require('fs').copyFileSync(helperPath, tmpImageHelperPath)
+        require('fs').chmodSync(tmpImageHelperPath, 0o755)
+      } catch (copyErr: any) {
+        return { success: false, error: `无法准备 helper 到临时目录: ${copyErr.message}` }
+      }
 
-        const { stdout: memOut, stderr } = await execFileAsync(helperPath, ['image_mem', pid.toString(), ciphertextHex])
+      try {
+        console.log(`[Debug] 准备执行 Helper: ${tmpImageHelperPath} image_mem ${pid} ${ciphertextHex}`);
 
-        console.log(`[Debug] Helper stdout: ${memOut}`);
-        if (stderr) {
-          console.warn(`[Debug] Helper stderr: ${stderr}`);
+        // image_mem 也需要 root 权限读取进程内存，用 sudo
+        if (!this.sudo || typeof this.sudo.exec !== 'function') {
+          return { success: false, error: 'Linux 授权组件 @vscode/sudo-prompt 未加载' }
         }
 
-        if (!memOut || memOut.trim() === '') {
-          return { success: false, error: 'Helper 返回为空，请检查是否有足够的权限(如需sudo)读取进程内存。' }
-        }
+        const memResult = await new Promise<DbKeyResult>((resolve) => {
+          const command = `"${tmpImageHelperPath}" image_mem ${pid} ${ciphertextHex}; rm -f "${tmpImageHelperPath}"`
+          this.sudo.exec(command, {
+            name: 'WeFlow',
+            env: { PATH: `${process.env.PATH || ''}:${SYSTEM_PATHS_IMAGE}` }
+          }, (error: any, sudoStdout: string, sudoStderr: string) => {
+            if (error) {
+              const detail = String(sudoStderr || '').trim()
+              resolve({ success: false, error: `权限获取失败: ${error.message}${detail ? ': ' + detail : ''}` })
+              return
+            }
+            const output = String(sudoStdout || '').trim()
+            console.log(`[Debug] Helper stdout: ${output}`);
+            if (sudoStderr) console.warn(`[Debug] Helper stderr: ${sudoStderr}`);
 
-        const res = JSON.parse(memOut.trim())
+            if (!output) {
+              resolve({ success: false, error: 'Helper 返回为空，请检查是否有足够的权限读取进程内存。' })
+              return
+            }
+            try {
+              const res = JSON.parse(output)
+              if (res.success) {
+                resolve({ success: true, key: res.key })
+              } else {
+                resolve({ success: false, error: res.result || '未知错误' })
+              }
+            } catch (e: any) {
+              resolve({ success: false, error: '解析 Helper 结果失败' })
+            }
+          })
+        })
 
-        if (res.success) {
+        if (memResult.success) {
           onProgress?.('内存扫描成功');
-          return { success: true, xorKey, aesKey: res.key }
+          return { success: true, xorKey, aesKey: memResult.key }
         }
-        return { success: false, error: res.result || '未知错误' }
+        return { success: false, error: memResult.error || '未知错误' }
 
       } catch (err: any) {
         console.error('[Debug] 执行或解析 Helper 时发生崩溃:', err);
+        execAsync(`rm -f "${tmpImageHelperPath}"`).catch(() => {})
         return {
           success: false,
           error: `内存扫描失败: ${err.message}\nstdout: ${err.stdout || '无'}\nstderr: ${err.stderr || '无'}`
